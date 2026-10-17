@@ -168,7 +168,34 @@ def resized_rgb(pil_image):
     return pil_image.convert("RGB").resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
 
 
-def overlay(pil_resized_224, cam, alpha=0.85, dim=0.55):
+# Different colormap for the layer-disagreement map: black -> purple -> magenta -> orange -> pale yellow.
+_DISAGREE_STOPS = np.array([0.00, 0.25, 0.50, 0.75, 1.00])
+_DISAGREE_COLORS = np.array([
+    [ 10,   5,  30],
+    [ 90,  20, 140],
+    [200,  40, 160],
+    [250, 130,  60],
+    [255, 240, 170],
+], dtype=np.float64)
+
+DISAGREE_LUT = _build_lut(_DISAGREE_STOPS, _DISAGREE_COLORS)
+
+
+def disagreement_map(cams, names=("layer2", "layer3", "layer4")):
+    """
+    Per-pixel standard deviation across the normalized layer maps, rescaled to [0, 1].
+    High values = the layers disagree about which regions matter there.
+    This is NOT an uncertainty estimate.
+    """
+    stack = np.stack([np.asarray(cams[n], dtype=np.float32) for n in names], axis=0)
+    std = stack.std(axis=0)
+    lo, hi = float(std.min()), float(std.max())
+    if not np.isfinite(hi - lo) or hi - lo <= _EPS:
+        return np.zeros_like(std, dtype=np.float32)
+    return np.clip((std - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+
+
+def overlay(pil_resized_224, cam, alpha=0.85, dim=0.55, lut=HEAT_LUT):
     """
     Blend the heatmap onto the 224x224 resized RGB image.
 
@@ -183,7 +210,7 @@ def overlay(pil_resized_224, cam, alpha=0.85, dim=0.55):
                          f"pass the 224x224 resized image (see resized_rgb)")
     gray = rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
     base = np.repeat((gray * dim)[..., None], 3, axis=2)
-    heat = colorize(cam).astype(np.float32)
+    heat = colorize(cam, lut).astype(np.float32)
     c = np.clip(np.nan_to_num(cam, nan=0.0), 0.0, 1.0)
     a = (alpha * np.sqrt(c))[..., None]
     out = base * (1.0 - a) + heat * a

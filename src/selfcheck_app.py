@@ -90,7 +90,7 @@ def main():
         for name, im in cases:
             html = app.analyze_image(im)
             assert CRASH_MARK not in html, f"{name}: scan crashed"
-            assert B64_MARK in html, f"{name}: no heatmap image in HTML"
+            assert html.count(B64_MARK) == 2, f"{name}: expected 2 map images, found {html.count(B64_MARK)}"
             assert app.SET_LABEL in html, f"{name}: no prediction set line in HTML"
         none_html = app.analyze_image(None)
         assert "Upload an image" in none_html, "None input not handled"

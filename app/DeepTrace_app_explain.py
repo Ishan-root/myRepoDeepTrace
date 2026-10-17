@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.model import get_model
-from src.gradcam import GradCAM, overlay, resized_rgb, to_png_base64
+from src.gradcam import DISAGREE_LUT, GradCAM, disagreement_map, overlay, resized_rgb, to_png_base64
 from src.conformal import fingerprint_matches, load_calibration, prediction_set, probs_from_logits, qhat_for
 
 MODEL_PATH = ROOT / "checkpoints" / "resnet18_deeptrace.pth"
@@ -504,13 +504,19 @@ def scan(pil_image):
     tensor = transform(pil_image).unsqueeze(0).to(device)
     notes = []
     heatmap_b64 = None
+    disagree_b64 = None
 
     try:
         with cam_lock:
             result = cam_engine(tensor)
         logits = result.logits
         probs = result.probs[0]
-        heatmap_b64 = to_png_base64(overlay(resized_rgb(pil_image), result.cams["layer4"]))
+        base_224 = resized_rgb(pil_image)
+        heatmap_b64 = to_png_base64(overlay(base_224, result.cams["layer4"]))
+        try:
+            disagree_b64 = to_png_base64(overlay(base_224, disagreement_map(result.cams), lut=DISAGREE_LUT))
+        except Exception:
+            traceback.print_exc()
     except Exception:
         traceback.print_exc()
         notes.append("Heatmap unavailable for this image.")
@@ -524,6 +530,7 @@ def scan(pil_image):
         "probs": [float(p) for p in probs.detach().cpu().tolist()],
         "confidence": float(probs[predicted_idx].item() * 100),
         "heatmap_b64": heatmap_b64,
+        "disagree_b64": disagree_b64,
         "pred_set": None,
         "notes": notes,
     }
@@ -573,6 +580,16 @@ def render_result(r):
     else:
         tile1 = '<div class="map-card">Where it looked</div>'
 
+    if r.get("disagree_b64"):
+        tile2 = (
+            '<div class="map-card has-img">'
+            f'<img src="data:image/png;base64,{r["disagree_b64"]}" alt="Layer disagreement map">'
+            '<div class="map-caption">Where layers disagreed</div>'
+            '</div>'
+        )
+    else:
+        tile2 = '<div class="map-card">Where layers disagreed</div>'
+
     return f"""
     <div class="result-block">
       {verdict_html}
@@ -580,7 +597,7 @@ def render_result(r):
       {notes_html}
       <div class="map-grid">
         {tile1}
-        <div class="map-card">Where layers disagreed</div>
+        {tile2}
       </div>
     </div>
     """

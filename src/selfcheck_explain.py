@@ -26,7 +26,7 @@ from PIL import Image
 from torchvision import transforms
 
 from model import get_model
-from gradcam import GradCAM, overlay, resized_rgb, to_png_base64
+from gradcam import DISAGREE_LUT, GradCAM, disagreement_map, overlay, resized_rgb, to_png_base64
 from conformal import (
     conformal_k,
     conformal_threshold,
@@ -468,6 +468,19 @@ def main():
         return f"max diff {worst:.2e}, argmax identical"
 
     run_check("13. conformal probs consistent with verdict probs", check_prob_consistency)
+
+    # 14: layer-disagreement map (tile 2)
+    def check_disagreement():
+        for name, (res, pil) in results.items():
+            d = disagreement_map(res.cams)
+            assert_cam_ok(d, f"{name}/disagreement")
+            ov = overlay(resized_rgb(pil), d, lut=DISAGREE_LUT)
+            assert ov.size == (IMAGE_SIZE, IMAGE_SIZE) and ov.mode == "RGB"
+        same = {n: np.full((IMAGE_SIZE, IMAGE_SIZE), 0.5, np.float32) for n in LAYER_NAMES}
+        assert disagreement_map(same).max() == 0.0, "identical layer maps should give an all-zero map"
+        return f"{len(results)} images, identical layers -> zero map"
+
+    run_check("14. layer-disagreement map", check_disagreement)
 
     # Final: still not mutated after everything
     run_check("3b. model still not mutated after all checks", check_not_mutated)
