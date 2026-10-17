@@ -168,19 +168,24 @@ def resized_rgb(pil_image):
     return pil_image.convert("RGB").resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
 
 
-def overlay(pil_resized_224, cam, alpha=0.45):
+def overlay(pil_resized_224, cam, alpha=0.85, dim=0.55):
     """
     Blend the heatmap onto the 224x224 resized RGB image.
-    Pixels with low importance stay closer to the original (alpha scales with the map),
-    so the photo stays readable.
+
+    The photo is turned grey and dimmed (`dim`) so the heat colours stand out even
+    on very colourful images. Heat opacity grows with importance: unimportant
+    regions show the grey photo, important regions show strong colour (up to `alpha`).
     """
-    base = np.asarray(pil_resized_224.convert("RGB"), dtype=np.float32)
+    rgb = np.asarray(pil_resized_224.convert("RGB"), dtype=np.float32)
     cam = np.asarray(cam, dtype=np.float32)
-    if base.shape[:2] != cam.shape:
-        raise ValueError(f"image {base.shape[:2]} and cam {cam.shape} sizes differ; "
+    if rgb.shape[:2] != cam.shape:
+        raise ValueError(f"image {rgb.shape[:2]} and cam {cam.shape} sizes differ; "
                          f"pass the 224x224 resized image (see resized_rgb)")
+    gray = rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    base = np.repeat((gray * dim)[..., None], 3, axis=2)
     heat = colorize(cam).astype(np.float32)
-    a = (alpha * (0.35 + 0.65 * np.clip(cam, 0.0, 1.0)))[..., None]
+    c = np.clip(np.nan_to_num(cam, nan=0.0), 0.0, 1.0)
+    a = (alpha * np.sqrt(c))[..., None]
     out = base * (1.0 - a) + heat * a
     return Image.fromarray(np.clip(np.round(out), 0, 255).astype(np.uint8))
 
