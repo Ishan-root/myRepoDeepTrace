@@ -1,0 +1,46 @@
+DeepTrace split-conformal calibration report
+============================================================
+Method: split conformal, LAC score 1 - p[true], float64 softmax of logits
+Data: data/raw_sala_sorted/test
+Checkpoint sha256: 2b29c46d231f01608920b7e8b6e353daec40ef29928337444ac3bb6970f66643  size: 44790376
+Scored: 7995  calibration: 3998  validation: 3997  seed: 42
+  FAKE: calibration 1999, validation 1998
+  REAL: calibration 1999, validation 1999
+Argmax accuracy: all scored 98.87%, validation 98.87%
+Calibration scores: min 0.000e+00, median 8.482e-06, max 9.750e-01, exactly 0: 8
+
+Validation half (never used for calibration):
+alpha=0.01  target coverage 99%   qhat=6.063910e-01
+    marginal coverage : 99.25%
+    coverage FAKE     : 99.70%  (n=1998)
+    coverage REAL     : 98.80%  (n=1999)
+    singleton sets    : 98.87%
+    both-class sets   : 1.13%
+    empty before fix  : 0.00%  (replaced by {argmax})
+    average set size  : 1.0113
+alpha=0.05  target coverage 95%   qhat=8.897118e-02
+    marginal coverage : 98.87%
+    coverage FAKE     : 99.55%  (n=1998)
+    coverage REAL     : 98.20%  (n=1999)
+    singleton sets    : 100.00%
+    both-class sets   : 0.00%
+    empty before fix  : 5.25%  (replaced by {argmax})
+    average set size  : 1.0000
+alpha=0.10  target coverage 90%   qhat=1.578336e-02
+    marginal coverage : 98.87%
+    coverage FAKE     : 99.55%  (n=1998)
+    coverage REAL     : 98.20%  (n=1999)
+    singleton sets    : 100.00%
+    both-class sets   : 0.00%
+    empty before fix  : 10.76%  (replaced by {argmax})
+    average set size  : 1.0000
+alpha=0.20  target coverage 80%   qhat=1.452475e-03
+    marginal coverage : 98.87%
+    coverage FAKE     : 99.55%  (n=1998)
+    coverage REAL     : 98.20%  (n=1999)
+    singleton sets    : 100.00%
+    both-class sets   : 0.00%
+    empty before fix  : 20.37%  (replaced by {argmax})
+    average set size  : 1.0000
+
+Note: coverage holds only for images exchangeable with this test split.

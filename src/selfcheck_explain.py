@@ -1,6 +1,7 @@
 # src/selfcheck_explain.py
 #
-# Plain assert-style checks for the Grad-CAM (Phase 1) part of DeepTrace.
+# Plain assert-style checks for DeepTrace's Grad-CAM (Phase 1) and
+# conformal prediction (Phase 2) code.
 # Run from the repo root:
 #     python src/selfcheck_explain.py
 #     python src/selfcheck_explain.py --device cpu      (force CPU)
@@ -26,11 +27,22 @@ from torchvision import transforms
 
 from model import get_model
 from gradcam import GradCAM, overlay, resized_rgb, to_png_base64
+from conformal import (
+    conformal_k,
+    conformal_threshold,
+    fingerprint_matches,
+    load_calibration,
+    prediction_set,
+    probs_from_logits,
+    qhat_for,
+    save_calibration,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATH = ROOT / "checkpoints" / "resnet18_deeptrace.pth"
 SAMPLE_DIR = ROOT / "sample_images"
 BASELINE_PATH = ROOT / "outputs" / "baseline_predictions.txt"
+CALIBRATION_PATH = ROOT / "outputs" / "conformal_calibration.json"
 PREVIEW_DIR = Path(tempfile.gettempdir()) / "deeptrace_gradcam_preview"
 
 CLASS_NAMES = ["FAKE", "REAL"]
@@ -313,6 +325,149 @@ def main():
         return f"{checked} images match baseline_predictions.txt"
 
     run_check("extra. Grad-CAM pass reproduces Phase 0 baseline", check_baseline)
+
+
+    # ======================= Phase 2: conformal =======================
+
+    # 8: conformal_threshold unit tests
+    def check_threshold():
+        inf = float("inf")
+        # n=1: k = ceil(2*0.9) = 2 > 1 -> +inf
+        assert conformal_threshold([0.3], 0.1) == inf, "n=1 should give +inf"
+        # n=8: k = ceil(9*0.9) = ceil(8.1) = 9 > 8 -> +inf
+        assert conformal_threshold(np.linspace(0, 1, 8), 0.1) == inf, "n=8 should give +inf"
+        # n=9: k = ceil(10*0.9) = 9 <= 9 -> largest score (finite!)
+        s9 = np.arange(1, 10) / 10.0
+        assert conformal_threshold(s9, 0.1) == 0.9, f"n=9 got {conformal_threshold(s9, 0.1)}"
+        # n=19, alpha=0.1: k = ceil(20*0.9) = 18 -> 18th smallest
+        s19 = np.arange(1, 20) / 100.0             # 0.01 .. 0.19
+        assert conformal_k(19, 0.1) == 18
+        assert conformal_threshold(s19, 0.1) == 0.18, f"n=19 got {conformal_threshold(s19, 0.1)}"
+        # unsorted input is sorted internally
+        assert conformal_threshold(s19[::-1].copy(), 0.1) == 0.18
+        # float-noise guard: (n+1)(1-a) that is an exact integer must not be bumped up
+        for n, a, k in [(19, 0.1, 18), (99, 0.1, 90), (99, 0.05, 95), (99, 0.01, 99), (999, 0.2, 800), (4, 0.2, 4)]:
+            assert conformal_k(n, a) == k, f"k(n={n}, alpha={a}) = {conformal_k(n, a)}, expected {k}"
+        # monotone: smaller alpha -> larger-or-equal qhat
+        rng = np.random.default_rng(1)
+        sc = rng.random(500)
+        qs = [conformal_threshold(sc, a) for a in [0.5, 0.2, 0.1, 0.05, 0.01, 0.001]]
+        assert all(qs[i] <= qs[i + 1] for i in range(len(qs) - 1)), f"not monotone: {qs}"
+        # ties
+        assert conformal_threshold([0.2] * 50, 0.1) == 0.2
+        assert conformal_threshold([0.0] * 30 + [0.5] * 20, 0.1) == 0.5
+        # bad input
+        for bad in [([], 0.1), ([0.1], 0.0), ([0.1], 1.0), ([float("nan")], 0.1)]:
+            try:
+                conformal_threshold(*bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"no ValueError for {bad}")
+        return "n=1/n=8 -> inf, n=9 -> max score, n=19 hand calc, k float guard, monotone, ties, bad input"
+
+    run_check("8. conformal_threshold unit tests", check_threshold)
+
+    # 9: prediction_set unit tests
+    def check_prediction_set():
+        assert prediction_set([0.9, 0.1], 0.2) == ([0], False)
+        assert prediction_set([0.1, 0.9], 0.2) == ([1], False)
+        assert prediction_set([0.6, 0.4], 0.7) == ([0, 1], False)
+        assert prediction_set([0.6, 0.4], float("inf")) == ([0, 1], False)
+        assert prediction_set([0.6, 0.4], 0.01) == ([0], True)    # empty -> argmax
+        assert prediction_set([0.3, 0.7], 0.0) == ([1], True)
+        assert prediction_set([1.0, 0.0], 0.0) == ([0], False)    # boundary is inclusive (<=)
+        p = probs_from_logits([[2.0, -1.0], [0.0, 0.0]])
+        assert p.dtype == np.float64 and np.allclose(p.sum(1), 1.0)
+        assert np.allclose(p[1], [0.5, 0.5])
+        big = probs_from_logits([1000.0, -1000.0])                 # no overflow
+        assert np.all(np.isfinite(big)) and big[0] == 1.0
+        return "singletons, both, inf, empty->argmax, inclusive boundary, stable softmax"
+
+    run_check("9. prediction_set / probs_from_logits unit tests", check_prediction_set)
+
+    # 10: synthetic coverage simulation
+    def check_simulation():
+        rng = np.random.default_rng(123)
+        lines = []
+        for alpha in [0.1, 0.05, 0.2]:
+            for n in [50, 500]:
+                covs = []
+                for _ in range(400):
+                    cal = rng.beta(0.5, 3.0, size=n)
+                    test = rng.beta(0.5, 3.0, size=2000)
+                    q = conformal_threshold(cal, alpha)
+                    covs.append(np.mean(test <= q))
+                mean_cov = float(np.mean(covs))
+                upper = 1 - alpha + 1.0 / (n + 1)
+                assert mean_cov >= 1 - alpha - 0.005, f"alpha={alpha} n={n}: coverage {mean_cov:.4f} too low"
+                assert mean_cov <= upper + 0.005, f"alpha={alpha} n={n}: coverage {mean_cov:.4f} above {upper:.4f}"
+                lines.append(f"a={alpha} n={n}: {mean_cov:.3f}")
+        # end-to-end binary classifier simulation, including the empty-set fix
+        covs = []
+        for _ in range(200):
+            def draw(m):
+                p_real = rng.beta(0.6, 0.6, size=m)
+                y = (rng.random(m) < p_real).astype(int)          # labels drawn from the probs
+                probs = np.stack([1 - p_real, p_real], axis=1)
+                return probs, y
+            cp, cy = draw(400)
+            q = conformal_threshold(1.0 - cp[np.arange(400), cy], 0.1)
+            tp, ty = draw(1000)
+            covs.append(np.mean([ty[i] in prediction_set(tp[i], q)[0] for i in range(1000)]))
+        e2e = float(np.mean(covs))
+        assert e2e >= 0.9 - 0.005, f"end-to-end coverage {e2e:.4f} below 0.895"
+        return "; ".join(lines) + f"; end-to-end a=0.1: {e2e:.3f}"
+
+    run_check("10. synthetic coverage simulation", check_simulation)
+
+    # 11: save/load round trip
+    def check_roundtrip():
+        rng = np.random.default_rng(7)
+        scores = np.concatenate([rng.random(57) ** 3, [0.0, 0.0, 1e-300, 0.5]])
+        fp = {"size": 123, "sha256": "ab" * 32}
+        alphas = [0.01, 0.05, 0.10, 0.20]
+        tmp = Path(tempfile.gettempdir()) / "deeptrace_selfcheck_calib.json"
+        try:
+            save_calibration(tmp, scores, 42, CLASS_NAMES, alphas, fp, extra={"note": "test"})
+            loaded = load_calibration(tmp)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+        assert np.array_equal(loaded["scores"], np.sort(scores)), "scores changed in round trip"
+        assert loaded["n"] == len(scores) and loaded["seed"] == 42
+        assert loaded["class_names"] == CLASS_NAMES and loaded["checkpoint"] == fp
+        for a in alphas:
+            assert loaded["qhat"][a] == conformal_threshold(scores, a), f"qhat mismatch at {a}"
+        assert loaded["qhat"][0.01] == float("inf"), "n=61, alpha=0.01 should be +inf and survive JSON"
+        return "scores bit-exact, qhat (incl. +inf) restored"
+
+    run_check("11. calibration JSON round trip", check_roundtrip)
+
+    # 12: the real calibration file
+    def check_real_calibration():
+        assert CALIBRATION_PATH.is_file(), f"missing {CALIBRATION_PATH} (run: python src/calibrate.py)"
+        cal = load_calibration(CALIBRATION_PATH)   # validates qhat vs scores
+        assert cal["class_names"] == CLASS_NAMES, f"class_names {cal['class_names']}"
+        assert fingerprint_matches(cal, CHECKPOINT_PATH), "checkpoint fingerprint does not match"
+        assert not (cal.get("extra") or {}).get("limit"), "this is a --limit smoke-test file, not a full run"
+        q = qhat_for(cal, 0.10)
+        return f"n={cal['n']}, qhat(0.10)={q:.6e}, fingerprint matches"
+
+    run_check("12. outputs/conformal_calibration.json valid and matches checkpoint", check_real_calibration)
+
+    # 13: float64 conformal probs agree with the float32 probs used for the verdict
+    def check_prob_consistency():
+        worst = 0.0
+        for name, (res, _) in results.items():
+            p64 = probs_from_logits(res.logits)[0]
+            p32 = res.probs[0].detach().cpu().double().numpy()
+            worst = max(worst, float(np.abs(p64 - p32).max()))
+            assert int(np.argmax(p64)) == res.class_idx, f"{name}: argmax differs"
+        assert worst <= 1e-6, f"float64 vs float32 probs differ by {worst:.2e}"
+        return f"max diff {worst:.2e}, argmax identical"
+
+    run_check("13. conformal probs consistent with verdict probs", check_prob_consistency)
 
     # Final: still not mutated after everything
     run_check("3b. model still not mutated after all checks", check_not_mutated)
